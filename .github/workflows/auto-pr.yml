@@ -240,6 +240,56 @@ jobs:
               labels: [LABEL_VALID]
             })
 
+            // Update sponsors.json to add the new file
+            try {
+              const manifestPath = 'data/sponsors/sponsors.json'
+              let manifestContent
+              let manifestSha
+
+              try {
+                const manifestRes = await github.rest.repos.getContent({
+                  owner,
+                  repo,
+                  path: manifestPath,
+                  ref: headSha
+                })
+                manifestContent = Buffer.from(manifestRes.data.content, 'base64').toString('utf8')
+                manifestSha = manifestRes.data.sha
+              } catch (e) {
+                // If file doesn't exist, create a new one
+                manifestContent = '{\n  "files": []\n}'
+              }
+
+              const manifest = JSON.parse(manifestContent)
+              const newFilename = file.filename.replace('data/sponsors/', '')
+
+              // Check if file already exists in manifest
+              if (!manifest.files.includes(newFilename)) {
+                manifest.files.push(newFilename)
+                // Sort files alphabetically
+                manifest.files.sort()
+
+                const updatedContent = JSON.stringify(manifest, null, 2)
+
+                // Commit the updated sponsors.json
+                await github.rest.repos.createOrUpdateFileContents({
+                  owner,
+                  repo,
+                  path: manifestPath,
+                  message: `chore: add ${newFilename} to sponsors.json [skip ci]`,
+                  content: Buffer.from(updatedContent).toString('base64'),
+                  sha: manifestSha,
+                  branch: context.payload.pull_request.head.ref
+                })
+
+                core.info(`Updated sponsors.json with ${newFilename}`)
+              }
+            } catch (e) {
+              core.error(`Failed to update sponsors.json: ${e.message}`)
+              await createComment(`⚠️ 验证通过，但更新 sponsors.json 失败: ${e.message}`)
+              return
+            }
+
             // Auto-merge if all checks pass
             try {
               await github.rest.pulls.merge({
