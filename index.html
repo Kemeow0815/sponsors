@@ -547,53 +547,24 @@
             const sponsorList = document.getElementById('sponsorList');
             
             try {
-                // Get list of JSON files from a manifest or try common names
-                // Since we can't list directory contents in pure client-side JS,
-                // we'll try to fetch a sponsors.json manifest file or use hardcoded list
                 const response = await fetch('data/sponsors/sponsors.json');
                 
                 if (!response.ok) {
-                    // If no manifest, try to load individual files
-                    await loadSponsorsFromManifest(null);
+                    sponsorList.innerHTML = '<div class="error">加载赞助者数据失败</div>';
                     return;
                 }
                 
-                const manifest = await response.json();
-                await loadSponsorsFromManifest(manifest);
+                const data = await response.json();
+                const sponsors = data.sponsors || [];
+                
+                // Sort by date (newest first)
+                sponsors.sort((a, b) => new Date(b.date) - new Date(a.date));
+                
+                renderSponsors(sponsors);
             } catch (error) {
                 console.error('Error loading sponsors:', error);
                 sponsorList.innerHTML = '<div class="error">加载赞助者数据失败</div>';
             }
-        }
-
-        async function loadSponsorsFromManifest(manifest) {
-            const sponsorList = document.getElementById('sponsorList');
-            const sponsors = [];
-            
-            // If no manifest, we'll create one dynamically by trying to fetch files
-            if (!manifest) {
-                // For now, we'll use a simple approach - the server should provide a way to list files
-                // or we can use a build step to generate the manifest
-                sponsorList.innerHTML = '<div class="error">请创建 data/sponsors/sponsors.json 清单文件</div>';
-                return;
-            }
-            
-            for (const filename of manifest.files) {
-                try {
-                    const response = await fetch(`data/sponsors/${filename}`);
-                    if (response.ok) {
-                        const sponsor = await response.json();
-                        sponsors.push(sponsor);
-                    }
-                } catch (e) {
-                    console.error(`Error loading ${filename}:`, e);
-                }
-            }
-            
-            // Sort by date (newest first)
-            sponsors.sort((a, b) => new Date(b.date) - new Date(a.date));
-            
-            renderSponsors(sponsors);
         }
 
         function renderSponsors(sponsors) {

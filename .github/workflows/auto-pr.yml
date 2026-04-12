@@ -45,8 +45,7 @@ jobs:
 
             const MSG = {
               PR_ONE_FILE: 'PR 必须仅包含一个文件变更。',
-              PR_PATH_ERROR: '只允许更改 data/sponsors/ 下的文件。',
-              JSON_EXT_ERROR: '文件必须是 .json 格式。',
+              PR_FILE_ERROR: '只允许修改 data/sponsors/sponsors.json 文件。',
               JSON_PARSE_ERROR: 'JSON 解析失败',
               VALIDATE_FAIL: '数据校验失败',
             }
@@ -95,7 +94,6 @@ jobs:
               const controller = new AbortController()
               const timer = setTimeout(() => controller.abort(), 10000)
               try {
-                // SSRF Protection
                 const u = new URL(url)
                 if (u.protocol !== 'http:' && u.protocol !== 'https:') {
                   return { ok: false, error: 'Invalid protocol' }
@@ -131,15 +129,12 @@ jobs:
               }
             }
 
-            // Ensure labels exist
             for (const name of [LABEL_SPONSOR, LABEL_AVATAR_OK, LABEL_AVATAR_BAD, LABEL_VALID]) {
               await ensureLabel(name)
             }
 
-            // Get changed files
             const files = await listAllFiles()
 
-            // Check file count
             if (files.length !== 1) {
               await createComment(MSG.PR_ONE_FILE)
               return
@@ -147,24 +142,15 @@ jobs:
 
             const file = files[0]
 
-            // Check file path
-            if (!file.filename.startsWith('data/sponsors/')) {
-              await createComment(MSG.PR_PATH_ERROR)
+            if (file.filename !== 'data/sponsors/sponsors.json') {
+              await createComment(MSG.PR_FILE_ERROR)
               return
             }
 
-            // Check file extension
-            if (!file.filename.endsWith('.json')) {
-              await createComment(MSG.JSON_EXT_ERROR)
-              return
-            }
-
-            // Skip if file was removed
             if (file.status === 'removed') {
               return
             }
 
-            // Add sponsor label
             await github.rest.issues.addLabels({
               owner,
               repo,
@@ -172,7 +158,6 @@ jobs:
               labels: [LABEL_SPONSOR]
             })
 
-            // Get file content
             const headSha = context.payload.pull_request.head.sha
             const res = await github.rest.repos.getContent({
               owner,
@@ -182,7 +167,6 @@ jobs:
             })
             const raw = Buffer.from(res.data.content, res.data.encoding || 'base64').toString('utf8')
 
-            // Parse JSON
             let data
             try {
               data = JSON.parse(raw)
@@ -191,16 +175,36 @@ jobs:
               return
             }
 
-            // Validate required fields
+            if (!data.sponsors || !Array.isArray(data.sponsors)) {
+              await createComment(`${MSG.VALIDATE_FAIL}: sponsors 必须是数组`)
+              return
+            }
+
             const errors = []
-            if (!isNonEmptyString(data.name)) {
-              errors.push('name 必须是字符串且不能为空')
-            }
-            if (!isNonEmptyString(data.date)) {
-              errors.push('date 必须是字符串且不能为空')
-            }
-            if (!isNonEmptyString(data.amount)) {
-              errors.push('amount 必须是字符串且不能为空')
+            const avatarCheckPromises = []
+
+            for (let i = 0; i < data.sponsors.length; i++) {
+              const sponsor = data.sponsors[i]
+              
+              if (!isNonEmptyString(sponsor.name)) {
+                errors.push(`sponsors[${i}].name 必须是字符串且不能为空`)
+              }
+              if (!isNonEmptyString(sponsor.date)) {
+                errors.push(`sponsors[${i}].date 必须是字符串且不能为空`)
+              }
+              if (!isNonEmptyString(sponsor.amount)) {
+                errors.push(`sponsors[${i}].amount 必须是字符串且不能为空`)
+              }
+
+              if (sponsor.avatar && isNonEmptyString(sponsor.avatar)) {
+                avatarCheckPromises.push(
+                  checkUrlReachability(sponsor.avatar).then(result => ({
+                    index: i,
+                    name: sponsor.name,
+                    result
+                  }))
+                )
+              }
             }
 
             if (errors.length > 0) {
@@ -208,31 +212,30 @@ jobs:
               return
             }
 
-            // Check avatar URL if provided
-            let avatarOk = true
-            if (data.avatar && isNonEmptyString(data.avatar)) {
-              const result = await checkUrlReachability(data.avatar)
-              if (result.ok) {
-                await github.rest.issues.addLabels({
-                  owner,
-                  repo,
-                  issue_number: pull_number,
-                  labels: [LABEL_AVATAR_OK]
-                })
-              } else {
-                avatarOk = false
-                await github.rest.issues.addLabels({
-                  owner,
-                  repo,
-                  issue_number: pull_number,
-                  labels: [LABEL_AVATAR_BAD]
-                })
-                await createComment(`头像链接不可达: ${result.error || result.status}`)
-                return
-              }
+            const avatarResults = await Promise.all(avatarCheckPromises)
+            const failedAvatars = avatarResults.filter(r => !r.result.ok)
+
+            if (failedAvatars.length > 0) {
+              await github.rest.issues.addLabels({
+                owner,
+                repo,
+                issue_number: pull_number,
+                labels: [LABEL_AVATAR_BAD]
+              })
+              const failedList = failedAvatars.map(r => `- ${r.name}: ${r.result.error || r.result.status}`).join('\n')
+              await createComment(`以下头像链接不可达:\n\n${failedList}`)
+              return
             }
 
-            // Add validation passed label
+            if (avatarResults.length > 0) {
+              await github.rest.issues.addLabels({
+                owner,
+                repo,
+                issue_number: pull_number,
+                labels: [LABEL_AVATAR_OK]
+              })
+            }
+
             await github.rest.issues.addLabels({
               owner,
               repo,
@@ -240,57 +243,6 @@ jobs:
               labels: [LABEL_VALID]
             })
 
-            // Update sponsors.json to add the new file
-            try {
-              const manifestPath = 'data/sponsors/sponsors.json'
-              let manifestContent
-              let manifestSha
-
-              try {
-                const manifestRes = await github.rest.repos.getContent({
-                  owner,
-                  repo,
-                  path: manifestPath,
-                  ref: headSha
-                })
-                manifestContent = Buffer.from(manifestRes.data.content, 'base64').toString('utf8')
-                manifestSha = manifestRes.data.sha
-              } catch (e) {
-                // If file doesn't exist, create a new one
-                manifestContent = '{\n  "files": []\n}'
-              }
-
-              const manifest = JSON.parse(manifestContent)
-              const newFilename = file.filename.replace('data/sponsors/', '')
-
-              // Check if file already exists in manifest
-              if (!manifest.files.includes(newFilename)) {
-                manifest.files.push(newFilename)
-                // Sort files alphabetically
-                manifest.files.sort()
-
-                const updatedContent = JSON.stringify(manifest, null, 2)
-
-                // Commit the updated sponsors.json
-                await github.rest.repos.createOrUpdateFileContents({
-                  owner,
-                  repo,
-                  path: manifestPath,
-                  message: `chore: add ${newFilename} to sponsors.json [skip ci]`,
-                  content: Buffer.from(updatedContent).toString('base64'),
-                  sha: manifestSha,
-                  branch: context.payload.pull_request.head.ref
-                })
-
-                core.info(`Updated sponsors.json with ${newFilename}`)
-              }
-            } catch (e) {
-              core.error(`Failed to update sponsors.json: ${e.message}`)
-              await createComment(`⚠️ 验证通过，但更新 sponsors.json 失败: ${e.message}`)
-              return
-            }
-
-            // Auto-merge if all checks pass
             try {
               await github.rest.pulls.merge({
                 owner,
