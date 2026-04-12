@@ -1,0 +1,254 @@
+name: auto-pr
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: auto-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  triage:
+    if: ${{ github.event_name == 'pull_request_target' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Validate PR
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const owner = context.repo.owner
+            const repo = context.repo.repo
+            const pull_number = context.payload.pull_request.number
+
+            const LABEL_SPONSOR = '赞助'
+            const LABEL_AVATAR_OK = '头像可达'
+            const LABEL_AVATAR_BAD = '头像不可达'
+            const LABEL_VALID = '验证通过'
+
+            const MSG = {
+              PR_ONE_FILE: 'PR 必须仅包含一个文件变更。',
+              PR_PATH_ERROR: '只允许更改 data/sponsors/ 下的文件。',
+              JSON_EXT_ERROR: '文件必须是 .json 格式。',
+              JSON_PARSE_ERROR: 'JSON 解析失败',
+              VALIDATE_FAIL: '数据校验失败',
+            }
+
+            async function ensureLabel(name) {
+              try {
+                await github.rest.issues.getLabel({ owner, repo, name })
+              } catch (e) {
+                if (e.status !== 404) throw e
+                await github.rest.issues.createLabel({
+                  owner,
+                  repo,
+                  name,
+                  color: 'ededed',
+                })
+              }
+            }
+
+            async function createComment(body) {
+              const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`
+              const footer = `\n\n---\n该评论由 Action 自动化发送，无需回复。\n\n🔗 [查看 Action](${runUrl})`
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: pull_number,
+                body: body + footer
+              })
+            }
+
+            async function listAllFiles() {
+              const files = []
+              for await (const res of github.paginate.iterator(
+                github.rest.pulls.listFiles,
+                { owner, repo, pull_number, per_page: 100 }
+              )) {
+                for (const f of res.data) files.push(f)
+              }
+              return files
+            }
+
+            function isNonEmptyString(v) {
+              return typeof v === 'string' && v.trim().length > 0
+            }
+
+            async function checkUrlReachability(url) {
+              const controller = new AbortController()
+              const timer = setTimeout(() => controller.abort(), 10000)
+              try {
+                // SSRF Protection
+                const u = new URL(url)
+                if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+                  return { ok: false, error: 'Invalid protocol' }
+                }
+                const h = u.hostname
+                if (h === 'localhost' || h === '127.0.0.1' || h === '::1') {
+                  return { ok: false, error: 'Localhost not allowed' }
+                }
+                if (/^10\./.test(h)) {
+                  return { ok: false, error: 'Private IP not allowed' }
+                }
+                if (/^192\.168\./.test(h)) {
+                  return { ok: false, error: 'Private IP not allowed' }
+                }
+                if (/^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(h)) {
+                  return { ok: false, error: 'Private IP not allowed' }
+                }
+
+                const res = await fetch(url, {
+                  method: 'GET',
+                  redirect: 'follow',
+                  headers: {
+                    'user-agent': 'sponsor-page-auto-pr/1.0',
+                    accept: 'text/html,application/json,image/*,*/*;q=0.8',
+                  },
+                  signal: controller.signal,
+                })
+                return { ok: res.status >= 200 && res.status < 400, status: res.status }
+              } catch (e) {
+                return { ok: false, error: e?.message || String(e) }
+              } finally {
+                clearTimeout(timer)
+              }
+            }
+
+            // Ensure labels exist
+            for (const name of [LABEL_SPONSOR, LABEL_AVATAR_OK, LABEL_AVATAR_BAD, LABEL_VALID]) {
+              await ensureLabel(name)
+            }
+
+            // Get changed files
+            const files = await listAllFiles()
+
+            // Check file count
+            if (files.length !== 1) {
+              await createComment(MSG.PR_ONE_FILE)
+              return
+            }
+
+            const file = files[0]
+
+            // Check file path
+            if (!file.filename.startsWith('data/sponsors/')) {
+              await createComment(MSG.PR_PATH_ERROR)
+              return
+            }
+
+            // Check file extension
+            if (!file.filename.endsWith('.json')) {
+              await createComment(MSG.JSON_EXT_ERROR)
+              return
+            }
+
+            // Skip if file was removed
+            if (file.status === 'removed') {
+              return
+            }
+
+            // Add sponsor label
+            await github.rest.issues.addLabels({
+              owner,
+              repo,
+              issue_number: pull_number,
+              labels: [LABEL_SPONSOR]
+            })
+
+            // Get file content
+            const headSha = context.payload.pull_request.head.sha
+            const res = await github.rest.repos.getContent({
+              owner,
+              repo,
+              path: file.filename,
+              ref: headSha
+            })
+            const raw = Buffer.from(res.data.content, res.data.encoding || 'base64').toString('utf8')
+
+            // Parse JSON
+            let data
+            try {
+              data = JSON.parse(raw)
+            } catch (e) {
+              await createComment(`${MSG.JSON_PARSE_ERROR}: ${e.message}`)
+              return
+            }
+
+            // Validate required fields
+            const errors = []
+            if (!isNonEmptyString(data.name)) {
+              errors.push('name 必须是字符串且不能为空')
+            }
+            if (!isNonEmptyString(data.date)) {
+              errors.push('date 必须是字符串且不能为空')
+            }
+            if (!isNonEmptyString(data.amount)) {
+              errors.push('amount 必须是字符串且不能为空')
+            }
+
+            if (errors.length > 0) {
+              await createComment(`${MSG.VALIDATE_FAIL}:\n\n` + errors.map(e => `- ${e}`).join('\n'))
+              return
+            }
+
+            // Check avatar URL if provided
+            let avatarOk = true
+            if (data.avatar && isNonEmptyString(data.avatar)) {
+              const result = await checkUrlReachability(data.avatar)
+              if (result.ok) {
+                await github.rest.issues.addLabels({
+                  owner,
+                  repo,
+                  issue_number: pull_number,
+                  labels: [LABEL_AVATAR_OK]
+                })
+              } else {
+                avatarOk = false
+                await github.rest.issues.addLabels({
+                  owner,
+                  repo,
+                  issue_number: pull_number,
+                  labels: [LABEL_AVATAR_BAD]
+                })
+                await createComment(`头像链接不可达: ${result.error || result.status}`)
+                return
+              }
+            }
+
+            // Add validation passed label
+            await github.rest.issues.addLabels({
+              owner,
+              repo,
+              issue_number: pull_number,
+              labels: [LABEL_VALID]
+            })
+
+            // Auto-merge if all checks pass
+            try {
+              await github.rest.pulls.merge({
+                owner,
+                repo,
+                pull_number,
+                merge_method: 'squash'
+              })
+              await createComment('✅ 所有检查通过，PR 已自动合并！')
+            } catch (e) {
+              await createComment(`自动合并失败: ${e.message}`)
+            }
