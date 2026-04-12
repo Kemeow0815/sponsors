@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const SPONSORS_DIR = path.join(__dirname, '..', 'data', 'sponsors');
+const SPONSORS_FILE = path.join(__dirname, '..', 'data', 'sponsors', 'sponsors.json');
 const TIMEOUT_MS = 10000;
 
 async function checkUrl(url) {
@@ -48,46 +48,34 @@ async function checkUrl(url) {
 }
 
 async function loadSponsors() {
-  const sponsors = [];
-  
   try {
-    const files = fs.readdirSync(SPONSORS_DIR);
-    
-    for (const file of files) {
-      if (file.endsWith('.json') && file !== 'sponsors.json') {
-        const filePath = path.join(SPONSORS_DIR, file);
-        const content = fs.readFileSync(filePath, 'utf8');
-        
-        try {
-          const data = JSON.parse(content);
-          sponsors.push({
-            filename: file,
-            data: data
-          });
-        } catch (e) {
-          console.error(`Failed to parse ${file}:`, e.message);
-        }
-      }
-    }
+    const content = fs.readFileSync(SPONSORS_FILE, 'utf8');
+    const data = JSON.parse(content);
+    return data.sponsors || [];
   } catch (e) {
-    console.error('Error reading sponsors directory:', e.message);
+    console.error('Error reading sponsors file:', e.message);
+    return [];
   }
-  
-  return sponsors;
 }
 
 async function main() {
   console.log('Checking sponsor links...\n');
   
   const sponsors = await loadSponsors();
-  const toDelete = [];
+  
+  if (sponsors.length === 0) {
+    console.log('No sponsors found.');
+    process.exit(0);
+  }
+  
+  const toRemove = [];
   let hasErrors = false;
   
-  for (const sponsor of sponsors) {
-    const { filename, data } = sponsor;
-    const { name, avatar } = data;
+  for (let i = 0; i < sponsors.length; i++) {
+    const sponsor = sponsors[i];
+    const { name, avatar } = sponsor;
     
-    console.log(`Checking: ${name} (${filename})`);
+    console.log(`Checking: ${name}`);
     
     if (avatar) {
       const result = await checkUrl(avatar);
@@ -96,7 +84,7 @@ async function main() {
         console.log(`  ✓ Avatar reachable (${result.status})`);
       } else {
         console.log(`  ✗ Avatar unreachable: ${result.error || result.status}`);
-        toDelete.push(filename);
+        toRemove.push(i);
         hasErrors = true;
       }
     } else {
@@ -106,26 +94,20 @@ async function main() {
     console.log('');
   }
   
-  if (toDelete.length > 0) {
-    console.log(`\nRemoving ${toDelete.length} unreachable sponsor(s):`);
+  if (toRemove.length > 0) {
+    console.log(`\nRemoving ${toRemove.length} unreachable sponsor(s):`);
     
-    for (const filename of toDelete) {
-      const filePath = path.join(SPONSORS_DIR, filename);
-      
-      try {
-        fs.unlinkSync(filePath);
-        console.log(`  ✓ Deleted ${filename}`);
-      } catch (e) {
-        console.error(`  ✗ Failed to delete ${filename}:`, e.message);
-      }
-    }
+    // Remove from the end to avoid index shifting
+    toRemove.reverse().forEach(index => {
+      const sponsor = sponsors[index];
+      console.log(`  ✓ Removed ${sponsor.name}`);
+      sponsors.splice(index, 1);
+    });
     
-    // Update sponsors.json
-    const manifestPath = path.join(SPONSORS_DIR, 'sponsors.json');
+    // Save updated sponsors.json
     try {
-      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-      manifest.files = manifest.files.filter(f => !toDelete.includes(f));
-      fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+      const updatedData = { sponsors };
+      fs.writeFileSync(SPONSORS_FILE, JSON.stringify(updatedData, null, 2));
       console.log('  ✓ Updated sponsors.json');
     } catch (e) {
       console.error('  ✗ Failed to update sponsors.json:', e.message);
