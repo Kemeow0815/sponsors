@@ -314,6 +314,19 @@
             color: var(--text-muted);
         }
 
+        .sponsor-item {
+            text-decoration: none;
+            color: inherit;
+        }
+
+        .sponsor-item.clickable {
+            cursor: pointer;
+        }
+
+        .sponsor-item.clickable:hover {
+            background-color: var(--hover-bg);
+        }
+
         .sponsor-info {
             flex: 1;
             min-width: 0;
@@ -333,20 +346,6 @@
             font-size: 0.75rem;
             color: var(--text-muted);
             margin-bottom: 2px;
-        }
-
-        .sponsor-url {
-            font-size: 0.7rem;
-        }
-
-        .sponsor-url a {
-            color: var(--accent-color);
-            text-decoration: none;
-            word-break: break-all;
-        }
-
-        .sponsor-url a:hover {
-            text-decoration: underline;
         }
 
         .sponsor-amount {
@@ -592,7 +591,7 @@
             }
             
             sponsorList.innerHTML = sponsors.map(sponsor => `
-                <div class="sponsor-item">
+                <a ${sponsor.url ? `href="${escapeHtml(sponsor.url)}" target="_blank" rel="noopener noreferrer"` : ''} class="sponsor-item ${sponsor.url ? 'clickable' : ''}">
                     <div class="sponsor-avatar">
                         ${sponsor.avatar 
                             ? `<img src="${sponsor.avatar}" alt="${sponsor.name}" onerror="this.style.display='none'; this.parentElement.innerHTML='<svg class=\\'default-avatar\\' xmlns=\\'http://www.w3.org/2000/svg\\' viewBox=\\'0 0 24 24\\' fill=\\'none\\' stroke=\\'currentColor\\' stroke-width=\\'2\\'><path d=\\'M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2\\'/><circle cx=\\'12\\' cy=\\'7\\' r=\\'4\\'/></svg>'">`
@@ -602,10 +601,9 @@
                     <div class="sponsor-info">
                         <div class="sponsor-name">${escapeHtml(sponsor.name)}</div>
                         <div class="sponsor-date">${escapeHtml(sponsor.date)}</div>
-                        ${sponsor.url ? `<div class="sponsor-url"><a href="${escapeHtml(sponsor.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(sponsor.url)}</a></div>` : ''}
                     </div>
                     <div class="sponsor-amount">${escapeHtml(sponsor.amount)}</div>
-                </div>
+                </a>
             `).join('');
         }
 
